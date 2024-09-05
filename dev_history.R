@@ -6,19 +6,11 @@
 
 library(sf)
 library(osmdata)
+library(terra)
+library(mapview)
 
 
-### AOI ----
-
-shp = st_bbox(rst) |> 
-  st_as_sfc()
-
-shp = st_as_sf(
-  data.table::data.table(
-    "Source" = "Königstein im Taunus"
-    , geometry = shp
-  )
-)
+### osm (poi) ----
 
 poi = getbb(
   "Kleiner Feldberg"
@@ -34,11 +26,39 @@ poi = getbb(
 
 poi$boundingbox = NULL
 
+
+### lidar ----
+
+pattern = st_centroid(poi) |> 
+  st_coordinates() |> 
+  substr(1, c(3, 4)) |> 
+  paste(
+    collapse = "_"
+  )
+
+# downloaded from https://gds.hessen.de/INTERSHOP/web/WFS/HLBG-Geodaten-Site/de_DE/-/EUR/ViewDownloadcenter-Start
+# > 3D-Daten > Digitales Oberflächenmodell (DOM1) > Hochtaunuskreis
+ifl = list.files(
+  "inst/extdata/Königstein im Taunus - DOM1"
+  , pattern = sprintf(
+    "%s.*\\.tif$"
+    , pattern
+  )
+  , full.names = TRUE
+)
+
+rst = rast(ifl)
+
+
+### osm (aoi) ----
+
+## draw 250-m buffer around poi
 aoi = st_buffer(
-  st_as_sfc(poi) |> st_transform(crs = 25832L)
+  poi
   , dist = 250
 )
 
+## select osm buildings in buffer extent
 bbx = aoi |> 
   st_transform(
     crs = 4326L
@@ -57,43 +77,57 @@ buildings = st_transform(
   , crs = 25832L
 )
 
-areas = st_area(
+## calculate base area
+buildings$area = st_area(
   buildings
-)
+) |> 
+  round(
+    digits = 2L
+  )
 
+## discard smaller buildings < 50 sqm
 minimum_size = 60
 units(minimum_size) = "m^2"
 
 large_buildings = subset(
   buildings
-  , idx <<- areas >= minimum_size
+  , area > minimum_size
 )
 
-sum(areas[idx])
+sum(large_buildings$area)
 
-
-### LiDAR ----
-
-tfs = list.files(
-  "/mnt/c/Users/flowd/Downloads/Königstein im Taunus - DOM1"
-  , pattern = "\\.tif$"
-  , full.names = TRUE
-)
-
-lst = lapply(
-  tfs
-  , terra::rast
-)
-
-rst = Reduce(
-  terra::merge
-  , lst
-)
-
-crp = terra::crop(
+## visualize
+crp = crop(
   rst
-  , large_buildings
+  , st_buffer(
+    large_buildings
+    , 50
+  )
 )
 
-mapview::mapview(large_buildings) + 
-  crp
+slp = terrain(crp)
+slp_hires = disagg(slp, fact = 4, method = "bilinear")
+
+(
+  m = mapview(
+    large_buildings
+    , layer.name = "Buildings"
+    , legend = FALSE
+    , color = "cornflowerblue"
+    , lwd = 2
+    , alpha.regions = 0
+  ) + 
+    mapview(
+      raster::raster(crp)
+      , layer.name = "Elevation (m)"
+      # , alpha.regions = 1
+      , hide = TRUE
+    ) + 
+    mapview(
+      raster::raster(slp_hires)
+      , maxpixels = 1e6
+      , layer.name = "Slope (°)"
+      # , alpha.regions = 1
+      , hide = TRUE
+    )
+)
